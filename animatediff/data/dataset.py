@@ -6,7 +6,7 @@ from decord import VideoReader
 import torch
 import torchvision.transforms as transforms
 from torch.utils.data.dataset import Dataset
-from animatediff.utils.util import zero_rank_print
+# from animatediff.utils.util import zero_rank_print
 
 
 
@@ -17,11 +17,11 @@ class WebVid10M(Dataset):
             sample_size=256, sample_stride=4, sample_n_frames=16,
             is_image=False,
         ):
-        zero_rank_print(f"loading annotations from {csv_path} ...")
-        with open(csv_path, 'r') as csvfile:
+        print(f"loading annotations from {csv_path} ...")
+        with open(csv_path, 'r', encoding="utf-8-sig") as csvfile:
             self.dataset = list(csv.DictReader(csvfile))
         self.length = len(self.dataset)
-        zero_rank_print(f"data scale: {self.length}")
+        print(f"data scale: {self.length}")
 
         self.video_folder    = video_folder
         self.sample_stride   = sample_stride
@@ -79,19 +79,19 @@ class WebVid10M(Dataset):
 
 
 if __name__ == "__main__":
-    from animatediff.utils.util import save_videos_grid
+    # from animatediff.utils.util import save_videos_grid
 
     dataset = WebVid10M(
-        csv_path="/mnt/petrelfs/guoyuwei/projects/datasets/webvid/results_2M_val.csv",
-        video_folder="/mnt/petrelfs/guoyuwei/projects/datasets/webvid/2M_val",
+        csv_path="/home/ubuntu/webvid/results_1_val_1/results_1_val.csv",
+        video_folder="/home/ubuntu/webvid/results_1_val_1/video",
         sample_size=256,
         sample_stride=4, sample_n_frames=16,
         is_image=True,
     )
-    import pdb
-    pdb.set_trace()
+    #import pdb
+    #pdb.set_trace()
     
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=16,)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=0,)
     for idx, batch in enumerate(dataloader):
         print(batch["pixel_values"].shape, len(batch["text"]))
         # for i in range(batch["pixel_values"].shape[0]):
