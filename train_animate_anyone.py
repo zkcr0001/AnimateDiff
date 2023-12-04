@@ -379,6 +379,9 @@ def main(
             # Predict the noise residual and compute loss
             # Mixed-precision training
             with torch.cuda.amp.autocast(enabled=mixed_precision_training):
+                # batch["reference_image"] [B, C, H, W] scale (0, 1)
+                # batch["pose_seqeucne"] [B, T, C, H, W]
+                
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 

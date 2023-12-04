@@ -1,5 +1,37 @@
 # AnimateDiff
 
+# AnimatedDiff training
+
+8卡 torchrun --nnodes=1 --nproc_per_node=8 train.py --config configs/training/training.yaml
+单卡 torchrun --nnodes=1 --nproc_per_node=1 train.py --config configs/training/training.yaml
+
+or
+
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=1 train.py --config configs/training/training.yaml
+
+## Animate_Anyone training
+
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=1 train_animate_anyone.py --config configs/training/training_animate_anyone.yaml
+
+batch_size在config里改 和 gradacc在python file里改
+
+debug config
+
+{
+    "name": "Python: Animate anyone training",
+    "type": "python",
+    "request": "launch",
+    "module": "torch.distributed.run",
+    "args": [
+        "--nnodes=1",
+        "--nproc_per_node=1",
+        "train_animate_anyone.py",
+        "--config",
+        "configs/training/training_animate_anyone.yaml"
+    ],
+    "cwd": "/home/ubuntu/AnimateDiff"
+}
+
 This repository is the official implementation of [AnimateDiff](https://arxiv.org/abs/2307.04725).
 
 **[AnimateDiff: Animate Your Personalized Text-to-Image Diffusion Models without Specific Tuning](https://arxiv.org/abs/2307.04725)**
