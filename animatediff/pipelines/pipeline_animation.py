@@ -377,7 +377,7 @@ class AnimationPipeline(DiffusionPipeline):
             device,
             generator,
             latents,
-        )
+        ) # (batch_size(1), latents_channel (4), frame_number(16), H // 8, W // 8)
         latents_dtype = latents.dtype
 
         # Prepare extra step kwargs.

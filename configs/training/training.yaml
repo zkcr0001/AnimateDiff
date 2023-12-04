@@ -28,8 +28,8 @@ noise_scheduler_kwargs:
   clip_sample:         false
 
 train_data:
-  csv_path:        "/home/ubuntu/webvid/results_1_val_1/results_1_val.csv"
-  video_folder:    "/home/ubuntu/webvid/results_1_val_1/video"
+  csv_path:        "/home/ubuntu/webvid/data/results_10M_val/results_10M_val.csv"
+  video_folder:    "/home/ubuntu/webvid/data/results_10M_val/videos"
   sample_size:     256
   sample_stride:   4
   sample_n_frames: 16
@@ -49,12 +49,12 @@ trainable_modules:
 unet_checkpoint_path: ""
 
 learning_rate:    1.e-4
-train_batch_size: 4
+train_batch_size: 2
 
 max_train_epoch:      -1
-max_train_steps:      100
+max_train_steps:      100000
 checkpointing_epochs: -1
-checkpointing_steps:  60
+checkpointing_steps:  5000
 
 validation_steps:       5000
 validation_steps_tuple: [2, 50]
