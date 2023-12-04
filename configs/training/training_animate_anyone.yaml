@@ -2,6 +2,7 @@ image_finetune: false
 
 output_dir: "outputs"
 pretrained_model_path: "models/StableDiffusion/stable-diffusion-v1-5"
+pretrained_reference_model_path: "models/StableDiffusion/stable-diffusion-v1-5"
 
 unet_additional_kwargs:
   use_motion_module              : true

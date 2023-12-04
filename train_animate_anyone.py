@@ -35,10 +35,13 @@ import transformers
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from animatediff.data.dataset import WebVid10M
-from animatediff.models.unet import UNet3DConditionModel
+# from animatediff.models.unet import UNet3DConditionModel
+from animatediff.models.animate_anyone_network import AnimateAnyoneModel
+from animatediff.models.animate_anyone_network import UNet3DConditionModel
+from animatediff.models.animate_anyone_network import PoseGuider
 from animatediff.pipelines.pipeline_animation import AnimationPipeline
 from animatediff.utils.util import save_videos_grid, zero_rank_print
-
+from sentence_transformers import SentenceTransformer
 
 
 def init_dist(launcher="slurm", backend='nccl', port=29500, **kwargs):
@@ -84,6 +87,7 @@ def main(
     
     output_dir: str,
     pretrained_model_path: str,
+    pretrained_reference_model_path: str,
 
     train_data: Dict,
     validation_data: Dict,
@@ -176,6 +180,15 @@ def main(
         )
     else:
         unet = UNet2DConditionModel.from_pretrained(pretrained_model_path, subfolder="unet")
+
+    reference_unet = UNet2DConditionModel.from_pretrained(pretrained_reference_model_path, subfolder="unet")
+    # CLIP: https://huggingface.co/openai/clip-vit-large-patch14, https://huggingface.co/docs/transformers/model_doc/clip
+    # https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPModel.get_image_features
+    # https://huggingface.co/sentence-transformers/clip-ViT-L-14
+    CLIP = SentenceTransformer('clip-ViT-L-14')
+    # Pose_Guider = 
+
+    # VAE + CLIP + Reference_net + Pose_Guider + Unet3D
         
     # Load pretrained unet weights
     if unet_checkpoint_path != "":
@@ -191,6 +204,7 @@ def main(
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
+    CLIP.requires_grad_(False)
     
     # Set unet trainable parameters
     unet.requires_grad_(False)
@@ -379,9 +393,15 @@ def main(
             # Predict the noise residual and compute loss
             # Mixed-precision training
             with torch.cuda.amp.autocast(enabled=mixed_precision_training):
-                # batch["reference_image"] [B, C, H, W] scale (0, 1)
-                # batch["pose_seqeucne"] [B, T, C, H, W]
-                
+                # batch["reference_image"] [B, C, H, W] scale (-1, 1)
+                # batch["pose_sequence"] [B, T, C, H, W] (-1, 1)
+                # batch["pixel_values"] [B, T, C, H, W] (-1, 1)
+
+                """
+                model_pred = 
+                """
+                # encoder_hidden_states [1,77,768]
+                # noisy_latents [B, C = 4, T, H // 8, W // 8]
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
