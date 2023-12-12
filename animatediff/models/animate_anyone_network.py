@@ -25,7 +25,8 @@ from .unet_blocks import (
     get_up_block,
 )
 from .resnet import InflatedConv3d, InflatedGroupNorm
-
+from einops import rearrange
+from torch.nn import functional as F
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -396,9 +397,10 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
             class_emb = self.class_embedding(class_labels).to(dtype=self.dtype)
             emb = emb + class_emb
 
+        # sample torch.Size([1, 4, 16, 32, 32])
         # pre-process
         sample = self.conv_in(sample)
-
+        # torch.Size([1, 320, 16, 32, 32])
         # down
         down_block_res_samples = (sample,)
         for downsample_block in self.down_blocks:
@@ -498,32 +500,90 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
     
 
 
+"""
 class AnimateAnyoneModel(nn.Module):
-    def __init__(self, VAE, CLIP, ReferenceNet, Pose_Guider, Unet_3D):
+    def __init__(self, VAE, CLIP, ReferenceNet, Pose_Guider3D, Unet_3D):
         super(AnimateAnyoneModel, self).__init__()
 
         self.VAE = VAE
         self.CLIP = CLIP
         self.ReferenceNet = ReferenceNet
-        self.Pose_Guider = Pose_Guider
+        self.Pose_Guider3D = Pose_Guider3D
         self.Unet_3D = Unet_3D
 
+    def forward(self, noise_sequence, reference_image, reference_image_pil, pose_sequence, timesteps):
+        B, F, C, H, W = pose_sequence.shape
+        reference_latents = self.VAE.encode(reference_image).latent_dist.sample()
+        reference_clip = self.CLIP.encode(reference_image_pil)
+        # decompose to for loop
+        reference_outputs = self.ReferenceNet(reference_latents, timesteps, reference_clip)
+        pose_guidance_sequence = self.Pose_Guider3D(pose_sequence)
 
-    def forward(self, reference_image, pose_sequence):
+        noise_outputs= self.Unet_3D(noise_sequence, timesteps).sample
+
         return 
+"""
+        
+class InflatedConv3d(nn.Conv2d):
+    def forward(self, x):
+        video_length = x.shape[2]
+
+        x = rearrange(x, "b c f h w -> (b f) c h w")
+        x = super().forward(x)
+        x = rearrange(x, "(b f) c h w -> b c f h w", f=video_length)
+
+        return x
     
-class PoseGuider(nn.Module):
+class PoseGuider3D(nn.Module):
+    """
+    Quoting from https://arxiv.org/abs/2302.05543: "Stable Diffusion uses a pre-processing method similar to VQ-GAN
+    [11] to convert the entire dataset of 512 × 512 images into smaller 64 × 64 “latent images” for stabilized
+    training. This requires ControlNets to convert image-based conditions to 64 × 64 feature space to match the
+    convolution size. We use a tiny network E(·) of four convolution layers with 4 × 4 kernels and 2 × 2 strides
+    (activated by ReLU, channels are 16, 32, 64, 128, initialized with Gaussian weights, trained jointly with the full
+    model) to encode image-space conditions ... into feature maps ..."
+
+    
+
+    Need to inflate this to 3D
+    """
+
     def __init__(
         self,
-        conditioning_channels: int = 3, 
-        block_out_channels: Tuple[int, ...] = (16, 32, 64, 128)
+        conditioning_embedding_channels: int = 320,
+        conditioning_channels: int = 3,
+        block_out_channels: Tuple[int] = (16, 32, 96, 256),
     ):
-        super(PoseGuider, self).__init__()
+        super().__init__()
 
-        self.conv_in = nn.Conv2d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
+        self.conv_in = InflatedConv3d(conditioning_channels, block_out_channels[0], kernel_size=3, padding=1)
 
-    def forward(self, pose_sequence):
-        # pose_sequence shape ([B, T, C, H, W] (-1, 1))
-        embedding = self.conv_in(pose_sequence)
+        self.blocks = nn.ModuleList([])
+
+        for i in range(len(block_out_channels) - 1):
+            channel_in = block_out_channels[i]
+            channel_out = block_out_channels[i + 1]
+            self.blocks.append(InflatedConv3d(channel_in, channel_in, kernel_size=3, padding=1))
+            self.blocks.append(InflatedConv3d(channel_in, channel_out, kernel_size=3, padding=1, stride=2))
+
+        self.conv_out = zero_module(
+            InflatedConv3d(block_out_channels[-1], conditioning_embedding_channels, kernel_size=3, padding=1)
+        )
+
+    def forward(self, conditioning):
+        # input (b c f h w)
+        embedding = self.conv_in(conditioning)
+        embedding = F.silu(embedding)
+
+        for block in self.blocks:
+            embedding = block(embedding)
+            embedding = F.silu(embedding)
+
+        embedding = self.conv_out(embedding)
 
         return embedding
+
+def zero_module(module):
+    for p in module.parameters():
+        nn.init.zeros_(p)
+    return module

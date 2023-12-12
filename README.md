@@ -1,15 +1,15 @@
 # AnimateDiff
 
-# Data preprocessing
+## Data preprocessing
 
 ### Fashion_Video
 
 https://vision.cs.ubc.ca/datasets/fashion/
 
-Download train/test data and script.
-'''
+Download training data, test data and download script.
+```
 python data_crowler.py
-'''
+```
 
 ### Tic-Tok
 
@@ -17,17 +17,17 @@ https://www.kaggle.com/datasets/yasaminjafarian/tiktokdataset
 
 Create free account from kaggle, then download API kaggle.json. Put it in ~/.kaggle/kaggle.json
 
-'''
+```
 pip install kaggle
 kaggle datasets download -d yasaminjafarian/tiktokdataset
-'''
+```
 
-Run preprocessing scripts
-'''
+Run preprocessing scripts (~100 hours using 8 cards)
+```
 CUDA_AVAILABLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nnodes=1 --nproc_per_node=8 --master-port 29511 pose_check.py
-'''
+```
 
-# AnimatedDiff training
+## AnimatedDiff training
 
 8卡 torchrun --nnodes=1 --nproc_per_node=8 train.py --config configs/training/training.yaml
 单卡 torchrun --nnodes=1 --nproc_per_node=1 train.py --config configs/training/training.yaml

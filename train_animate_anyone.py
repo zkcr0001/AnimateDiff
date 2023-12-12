@@ -38,11 +38,11 @@ from animatediff.data.dataset import WebVid10M
 # from animatediff.models.unet import UNet3DConditionModel
 from animatediff.models.animate_anyone_network import AnimateAnyoneModel
 from animatediff.models.animate_anyone_network import UNet3DConditionModel
-from animatediff.models.animate_anyone_network import PoseGuider
+from animatediff.models.animate_anyone_network import PoseGuider3D
 from animatediff.pipelines.pipeline_animation import AnimationPipeline
 from animatediff.utils.util import save_videos_grid, zero_rank_print
 from sentence_transformers import SentenceTransformer
-
+from einops import rearrange
 
 def init_dist(launcher="slurm", backend='nccl', port=29500, **kwargs):
     """Initializes distributed environment."""
@@ -185,11 +185,12 @@ def main(
     # CLIP: https://huggingface.co/openai/clip-vit-large-patch14, https://huggingface.co/docs/transformers/model_doc/clip
     # https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPModel.get_image_features
     # https://huggingface.co/sentence-transformers/clip-ViT-L-14
-    CLIP = SentenceTransformer('clip-ViT-L-14')
-    # Pose_Guider = 
+    clip = SentenceTransformer('clip-ViT-L-14')
+    pose_guider = PoseGuider3D()
 
-    # VAE + CLIP + Reference_net + Pose_Guider + Unet3D
-        
+    # VAE + CLIP + Reference_net + Pose_Guider + Unet    animate_anyone_model = AnimateAnyoneModel(VAE = vae, CLIP = clip, ReferenceNet = reference_unet, Pose_Guider3D = pose_guider, Unet_3D = unet)
+    animate_anyone_model.to(local_rank)
+
     # Load pretrained unet weights
     if unet_checkpoint_path != "":
         zero_rank_print(f"from checkpoint: {unet_checkpoint_path}")
@@ -204,7 +205,6 @@ def main(
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    CLIP.requires_grad_(False)
     
     # Set unet trainable parameters
     unet.requires_grad_(False)
@@ -396,6 +396,7 @@ def main(
                 # batch["reference_image"] [B, C, H, W] scale (-1, 1)
                 # batch["pose_sequence"] [B, T, C, H, W] (-1, 1)
                 # batch["pixel_values"] [B, T, C, H, W] (-1, 1)
+                # batch["pose_sequence"] = rearrange(batch["pose_sequence"], "b f c h w -> b c f h w")
 
                 """
                 model_pred = 

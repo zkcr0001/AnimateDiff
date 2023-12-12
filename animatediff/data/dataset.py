@@ -96,3 +96,4 @@ if __name__ == "__main__":
         print(batch["pixel_values"].shape, len(batch["text"]))
         # for i in range(batch["pixel_values"].shape[0]):
         #     save_videos_grid(batch["pixel_values"][i:i+1].permute(0,2,1,3,4), os.path.join(".", f"{idx}-{i}.mp4"), rescale=True)
+
