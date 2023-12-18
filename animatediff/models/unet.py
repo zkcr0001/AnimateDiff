@@ -88,8 +88,11 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         motion_module_kwargs           = {},
         unet_use_cross_frame_attention = None,
         unet_use_temporal_attention    = None,
+        shrink_half = False
     ):
         super().__init__()
+
+        self.shrink_half = shrink_half
         
         self.sample_size = sample_size
         time_embed_dim = block_out_channels[0] * 4
@@ -157,6 +160,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 use_motion_module=use_motion_module and (res in motion_module_resolutions) and (not motion_module_decoder_only),
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
+                shrink_half =  self.shrink_half
             )
             self.down_blocks.append(down_block)
 
@@ -183,6 +187,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 use_motion_module=use_motion_module and motion_module_mid_block,
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
+                shrink_half =  self.shrink_half
             )
         else:
             raise ValueError(f"unknown mid_block_type : {mid_block_type}")
@@ -236,6 +241,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                 use_motion_module=use_motion_module and (res in motion_module_resolutions),
                 motion_module_type=motion_module_type,
                 motion_module_kwargs=motion_module_kwargs,
+                shrink_half =  self.shrink_half
             )
             self.up_blocks.append(up_block)
             prev_output_channel = output_channel

@@ -48,6 +48,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
 
         unet_use_cross_frame_attention=None,
         unet_use_temporal_attention=None,
+        shrink_half = False
     ):
         super().__init__()
         self.use_linear_projection = use_linear_projection
@@ -81,6 +82,7 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
 
                     unet_use_cross_frame_attention=unet_use_cross_frame_attention,
                     unet_use_temporal_attention=unet_use_temporal_attention,
+                    shrink_half = shrink_half
                 )
                 for d in range(num_layers)
             ]
@@ -92,6 +94,8 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         else:
             self.proj_out = nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
 
+        self.shrink_half = shrink_half
+
     def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, return_dict: bool = True):
         # Input
         assert hidden_states.dim() == 5, f"Expected hidden_states to have ndim=5, but got ndim={hidden_states.dim()}."
@@ -100,16 +104,25 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
         encoder_hidden_states = repeat(encoder_hidden_states, 'b n c -> (b f) n c', f=video_length)
 
         batch, channel, height, weight = hidden_states.shape
-        residual = hidden_states
+        if self.shrink_half:
+            weight = weight // 2
+
+        residual = hidden_states[:, :, :, :weight]
 
         hidden_states = self.norm(hidden_states)
         if not self.use_linear_projection:
             hidden_states = self.proj_in(hidden_states)
             inner_dim = hidden_states.shape[1]
-            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * weight, inner_dim)
+            if self.shrink_half:
+                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * weight * 2, inner_dim)
+            else:
+                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * weight, inner_dim)
         else:
             inner_dim = hidden_states.shape[1]
-            hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * weight, inner_dim)
+            if self.shrink_half:
+                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * weight * 2, inner_dim)
+            else:
+                hidden_states = hidden_states.permute(0, 2, 3, 1).reshape(batch, height * weight, inner_dim)
             hidden_states = self.proj_in(hidden_states)
 
         # Blocks
@@ -118,7 +131,11 @@ class Transformer3DModel(ModelMixin, ConfigMixin):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 timestep=timestep,
-                video_length=video_length
+                video_length=video_length,
+                height = height,
+                width = weight,
+                channel = channel,
+                batch = batch
             )
 
         # Output
@@ -158,8 +175,11 @@ class BasicTransformerBlock(nn.Module):
 
         unet_use_cross_frame_attention = None,
         unet_use_temporal_attention = None,
+
+        shrink_half = False
     ):
         super().__init__()
+        self.shrink_half = shrink_half
         self.only_cross_attention = only_cross_attention
         self.use_ada_layer_norm = num_embeds_ada_norm is not None
         self.unet_use_cross_frame_attention = unet_use_cross_frame_attention
@@ -253,7 +273,7 @@ class BasicTransformerBlock(nn.Module):
                 self.attn2._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
             # self.attn_temp._use_memory_efficient_attention_xformers = use_memory_efficient_attention_xformers
 
-    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None):
+    def forward(self, hidden_states, encoder_hidden_states=None, timestep=None, attention_mask=None, video_length=None, height = None, width = None, batch = None, channel = None):
         # SparseCausal-Attention
         norm_hidden_states = (
             self.norm1(hidden_states, timestep) if self.use_ada_layer_norm else self.norm1(hidden_states)
@@ -271,6 +291,11 @@ class BasicTransformerBlock(nn.Module):
             hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask, video_length=video_length) + hidden_states
         else:
             hidden_states = self.attn1(norm_hidden_states, attention_mask=attention_mask) + hidden_states
+
+        if self.shrink_half:
+            hidden_states = hidden_states.reshape(batch, height, width * 2, channel)
+            hidden_states = hidden_states[:, :, :width, :]
+            hidden_states = hidden_states.reshape(batch, height * width, channel)
 
         if self.attn2 is not None:
             # Cross-Attention

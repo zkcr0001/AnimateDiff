@@ -78,10 +78,10 @@ class VideoDataset(Dataset):
         batch_index = np.linspace(start_frame, start_frame + clip_length - 1, self.sample_frame, dtype=int) if not self.only_train_image else [start_frame]
 
         # Read images and openposes
-        images_out = torch.from_numpy(image_reader.get_batch(batch_index).asnumpy()).permute(0, 3, 1, 2).contiguous()
-        images_out = images_out / 255.
-        openposes_out = torch.from_numpy(openpose_reader.get_batch(batch_index).asnumpy()).permute(0, 3, 1, 2).contiguous()
-        openposes_out = openposes_out / 255.
+        images_batch = image_reader.get_batch(batch_index).asnumpy()
+        images_out = torch.from_numpy(images_batch).permute(0, 3, 1, 2).contiguous()
+        openposes_batch = openpose_reader.get_batch(batch_index).asnumpy()
+        openposes_out = torch.from_numpy(openposes_batch).permute(0, 3, 1, 2).contiguous()
         openposes_out = transforms.Resize((ori_H, ori_W))(openposes_out)
 
         del image_reader, openpose_reader
@@ -97,7 +97,7 @@ class VideoDataset(Dataset):
         if resize_W < new_W:
             left_W = torch.randint(0, new_W - resize_W + 1, (1,)).item()
             left_H = torch.randint(0, resize_H - new_H + 1, (1,)).item() // 2
-            images_out = torch.nn.functional.pad(images_out, (left_W, new_W - resize_W - left_W, 0, 0), mode='constant', value=1)
+            images_out = torch.nn.functional.pad(images_out, (left_W, new_W - resize_W - left_W, 0, 0), mode='constant', value=255)
             openposes_out = torch.nn.functional.pad(openposes_out, (left_W, new_W - resize_W - left_W, 0, 0), mode='constant', value=0)
             images_out = images_out[:, :, left_H:left_H + new_H, :]
             openposes_out = openposes_out[:, :, left_H:left_H + new_H, :]
@@ -112,15 +112,44 @@ class VideoDataset(Dataset):
             images_out = torch.flip(images_out, dims=(3,))
             openposes_out = torch.flip(openposes_out, dims=(3,))
 
+        images_pil = [Image.fromarray(image) for image in images_out.permute(0, 2, 3, 1).numpy().astype(np.uint8)]
+        openposes_pil = [Image.fromarray(image) for image in openposes_out.permute(0, 2, 3, 1).numpy().astype(np.uint8)]
+        
+
+        images_out = images_out / 255.
+        openposes_out = openposes_out / 255.
+
         # Normalize the image
         images_out = self.norm_transforms(images_out)
 
-        return dict(pixel_values=images_out, openpose_values=openposes_out)
+        return dict(
+            pixel_values=images_out,    
+            openpose_values=openposes_out,
+            images=images_pil,
+            openposes=openposes_pil,
+            sample_stride=sample_stride,
+        )
     
 
     def __len__(self):
         return len(self.data_list)
     
+
+def collate_fn(batch):
+    pixel_values = torch.stack([b["pixel_values"] for b in batch], dim=0)
+    openpose_values = torch.stack([b["openpose_values"] for b in batch], dim=0)
+    images = [b["images"] for b in batch] 
+    openposes = [b["openposes"] for b in batch]
+    sample_stride = [b["sample_stride"] for b in batch]
+    return dict(
+            pixel_values=pixel_values,    
+            openpose_values=openpose_values,
+            images=images,
+            openposes=openposes,
+            sample_stride=sample_stride,
+        )
+
+
 
 if __name__ == "__main__":
 
@@ -128,16 +157,16 @@ if __name__ == "__main__":
 
     print("--------Video Dataset--------")
     dataset = VideoDataset(folder_list)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=0,)
+    dataloader = torch.utils.data.DataLoader(dataset, collate_fn=collate_fn, batch_size=4, num_workers=0,)
     for idx, batch in enumerate(dataloader):
-        print(batch["pixel_values"].shape, batch["openpose_values"].shape)
+        print(batch["pixel_values"].shape, batch["openpose_values"].shape, len(batch["images"][0]), len(batch["openposes"][0]), len(batch["sample_stride"]))
         if idx == 3:
             break
 
     print("--------Image Dataset--------")
     dataset = VideoDataset(folder_list, only_train_image=True)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, num_workers=0,)
+    dataloader = torch.utils.data.DataLoader(dataset, collate_fn=collate_fn, batch_size=4, num_workers=0,)
     for idx, batch in enumerate(dataloader):
-        print(batch["pixel_values"].shape, batch["openpose_values"].shape)
+        print(batch["pixel_values"].shape, batch["openpose_values"].shape, len(batch["images"][0]), len(batch["openposes"][0]), len(batch["sample_stride"]))
         if idx == 3:
             break

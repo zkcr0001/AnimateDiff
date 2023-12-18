@@ -3,11 +3,11 @@ from omegaconf import OmegaConf
 from PIL import Image
 import requests
 
+
 from diffusers.models import UNet2DConditionModel
-# from animatediff.models.animate_anyone_network import AnimateAnyoneModel
-from animatediff.models.animate_anyone_network import UNet3DConditionModel
-from animatediff.models.animate_anyone_network import PoseGuider3D
-from animatediff.pipelines.pipeline_animation import AnimationPipeline
+from .animate_anyone_network_print import UNet3DConditionModel
+from .animate_anyone_network import PoseGuider3D
+
 from sentence_transformers import SentenceTransformer
 import torch.nn as nn
 import torch
@@ -120,8 +120,8 @@ class AnimateAnyoneModel(nn.Module):
         reference_prompt = torch.from_numpy(reference_prompt).repeat(1, 77, 1).cuda() # torch.size([1, 77, 768])
         # TODO: should we pad zero, should we add classifier free guidance
         reference_net_results_list = self.get_reference_results(reference_latents, timesteps, reference_prompt)
-        for test_tensor in reference_net_results_list:
-            print(test_tensor.shape)
+        for idx, test_tensor in enumerate(reference_net_results_list):
+            print("ref list", idx, test_tensor.shape)
         pose_sequence = rearrange(pose_sequence, "b f c h w -> b c f h w")
         
         # ======================
@@ -130,6 +130,7 @@ class AnimateAnyoneModel(nn.Module):
         # ======================
 
         pose_guidance_sequence = self.Pose_Guider3D(pose_sequence) # [B, 320, F, H // 8, W // 8]
+        print("pose guidance sequence shape:", pose_guidance_sequence.shape)
 
         attention_mask = None
         forward_upsample_size = False
@@ -145,7 +146,7 @@ class AnimateAnyoneModel(nn.Module):
         emb = self.ReferenceNet.time_embedding(t_emb)
         # 2. preprocess
         noise_sequence = self.Unet_3D.conv_in(noise_sequence) # [B , 320, H // 8, W // 8])
-        print("noise sequence shape:", noise_sequence.shape)
+        print("noise sequence shape after conv in:", noise_sequence.shape)
         # add reference latents and pose_guidance_sequence
         noise_sequence += pose_guidance_sequence
         # 3. down
@@ -154,33 +155,51 @@ class AnimateAnyoneModel(nn.Module):
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
                 # if has cross attention, then it will have spatial attention, do feature concatentaion
                 noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
+                print("noise sequence shape after concat:", noise_sequence.shape)
                 noise_sequence, res_samples = downsample_block(
                     hidden_states=noise_sequence,
                     temb=emb,
                     encoder_hidden_states=reference_prompt,
                     attention_mask=attention_mask,
                 )
+                print("noise sequence shape after downsample:", noise_sequence.shape)
             else:
                 noise_sequence, res_samples = downsample_block(hidden_states=noise_sequence, temb=emb)
             reference_block_id_count += 1
 
             down_block_res_samples += res_samples
-            print("noise sequence shape:", noise_sequence.shape)
+            print("noise sequence shape down out:", noise_sequence.shape)
 
         # 4. mid
         noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
+        print("noise sequence shape after concat mid:", noise_sequence.shape)
         reference_block_id_count += 1
         noise_sequence = self.Unet_3D.mid_block(
             noise_sequence, emb, encoder_hidden_states=reference_prompt, attention_mask=attention_mask
         )
-        print("noise sequence shape:", noise_sequence.shape)
+        print("noise sequence shape after mid:", noise_sequence.shape)
 
         # 5. up
+        
+
         for i, upsample_block in enumerate(self.Unet_3D.up_blocks):
             is_final_block = i == len(self.Unet_3D.up_blocks) - 1
 
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
+
+            res_samples_change = ()
+            if i > 1:
+                for idx, res_sample in enumerate(res_samples):
+                    if idx == 0:
+                        res_samples_change += (torch.cat([res_sample, res_sample], dim=-1),)
+                    else:
+                        res_samples_change += (res_sample,)
+                res_samples = res_samples_change
+                
+
+            for idx, test_tensor in enumerate(res_samples):
+                print("res_samples in up", idx, test_tensor.shape)
 
             # if we have not reached the final block and need to forward the
             # upsample size, we do it here
@@ -189,6 +208,7 @@ class AnimateAnyoneModel(nn.Module):
 
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
                 noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
+                print("noise sequence shape after concat up:", noise_sequence.shape)
                 noise_sequence = upsample_block(
                     hidden_states=noise_sequence,
                     temb=emb,
@@ -197,6 +217,7 @@ class AnimateAnyoneModel(nn.Module):
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
                 )
+                print("noise sequence shape after upsample:", noise_sequence.shape)
             else:
                 noise_sequence = upsample_block(
                     hidden_states=noise_sequence, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size

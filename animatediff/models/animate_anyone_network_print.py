@@ -15,7 +15,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.modeling_utils import ModelMixin
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
-from .unet_blocks import (
+from .unet_blocks_print import (
     CrossAttnDownBlock3D,
     CrossAttnUpBlock3D,
     DownBlock3D,
@@ -403,7 +403,9 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
         # sample torch.Size([1, 4, 16, 32, 32])
         # pre-process
+        print("sample before conv_in", sample.shape)
         sample = self.conv_in(sample)
+        print("sample after conv_in", sample.shape)
         # torch.Size([1, 320, 16, 32, 32])
         # down
         down_block_res_samples = (sample,)
@@ -415,21 +417,34 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
                 )
+                print("sample in down_blocks for loop after downsample_block", sample.shape)
+                for i, f in enumerate(res_samples):
+                    print("res_samples in down_blocks for loop after downsample_block", i, f.shape)
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=emb, encoder_hidden_states=encoder_hidden_states)
+                print("sample in down_blocks for loop after downsample_block", sample.shape)
+                for i, f in enumerate(res_samples):
+                    print("res_samples in down_blocks for loop after downsample_block", i, f.shape)
 
             down_block_res_samples += res_samples
 
         # mid
+        print("sample before mid_block", sample.shape)
+        print("emb before mid_block", emb.shape)
+        print("encoder_hidden_states before mid_block", encoder_hidden_states.shape)
+        print("attention_mask before mid_block", attention_mask.shape if attention_mask is not None else None)
         sample = self.mid_block(
             sample, emb, encoder_hidden_states=encoder_hidden_states, attention_mask=attention_mask
         )
+        print("sample after mid_block", sample.shape)
 
         # up
         for i, upsample_block in enumerate(self.up_blocks):
             is_final_block = i == len(self.up_blocks) - 1
-
+            print("sample in up_blocks for loop before upsample_block", sample.shape)
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
+            for i, f in enumerate(res_samples):
+                print("res_samples in up_blocks for loop in", i, f.shape)
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
             # if we have not reached the final block and need to forward the
@@ -446,18 +461,25 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
                 )
+                print("sample in up_blocks for loop after upsample_block", sample.shape)
             else:
                 sample = upsample_block(
                     hidden_states=sample, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size, encoder_hidden_states=encoder_hidden_states,
                 )
+                print("sample in up_blocks for loop after upsample_block", sample.shape)
 
         # post-process
         sample = self.conv_norm_out(sample)
+        print("sample after conv_norm_out", sample.shape)
         sample = self.conv_act(sample)
+        print("sample after conv_act", sample.shape)
         sample = self.conv_out(sample)
+        print("sample after conv_out", sample.shape)
 
         if not return_dict:
             return (sample,)
+    
+        print("sample out", sample.shape)
 
         return UNet3DConditionOutput(sample=sample)
 

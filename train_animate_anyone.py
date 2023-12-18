@@ -34,7 +34,7 @@ from diffusers.utils.import_utils import is_xformers_available
 import transformers
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from animatediff.data.dataset import WebVid10M
+from animatediff.data.video_dataset import VideoDataset
 # from animatediff.models.unet import UNet3DConditionModel
 from animatediff.models.animate_anyone_network import AnimateAnyoneModel
 from animatediff.models.animate_anyone_network import UNet3DConditionModel

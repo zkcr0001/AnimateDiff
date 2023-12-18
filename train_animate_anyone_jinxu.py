@@ -34,12 +34,15 @@ from diffusers.utils.import_utils import is_xformers_available
 import transformers
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from animatediff.data.dataset import WebVid10M
-from animatediff.models.unet import UNet3DConditionModel
+from animatediff.data.video_dataset import VideoDataset, collate_fn
+# from animatediff.models.unet import UNet3DConditionModel
+from animatediff.models.animate_any_model_jinxu import AnimateAnyoneModel
+from animatediff.models.animate_anyone_network import UNet3DConditionModel
+from animatediff.models.animate_anyone_network import PoseGuider3D
 from animatediff.pipelines.pipeline_animation import AnimationPipeline
 from animatediff.utils.util import save_videos_grid, zero_rank_print
-
-
+from sentence_transformers import SentenceTransformer
+from einops import rearrange
 
 def init_dist(launcher="slurm", backend='nccl', port=29500, **kwargs):
     """Initializes distributed environment."""
@@ -47,6 +50,7 @@ def init_dist(launcher="slurm", backend='nccl', port=29500, **kwargs):
         rank = int(os.environ['RANK'])
         num_gpus = torch.cuda.device_count()
         local_rank = rank % num_gpus
+        print("111", rank, local_rank, num_gpus)
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend=backend, **kwargs)
         
@@ -83,9 +87,10 @@ def main(
     
     output_dir: str,
     pretrained_model_path: str,
+    pretrained_reference_model_path: str,
 
-    train_data: Dict,
-    validation_data: Dict,
+    train_data_folder_list: list = [Path("/home/ubuntu/Pose_dataset/Processed_video/Fashion_train"), Path("/home/ubuntu/Pose_dataset/Processed_video/Tic-Tok_train")],
+    validation_data_folder_list: list = [Path("/home/ubuntu/Pose_dataset/Processed_video/Fashion_test"), Path("/home/ubuntu/Pose_dataset/Processed_video/Tic-Tok_test")],
     cfg_random_null_text: bool = True,
     cfg_random_null_text_ratio: float = 0.1,
     
@@ -112,7 +117,7 @@ def main(
     adam_weight_decay: float = 1e-2,
     adam_epsilon: float = 1e-08,
     max_grad_norm: float = 1.0,
-    gradient_accumulation_steps: int = 1,
+    gradient_accumulation_steps: int = 4,
     gradient_checkpointing: bool = False,
     checkpointing_epochs: int = 5,
     checkpointing_steps: int = -1,
@@ -166,16 +171,17 @@ def main(
     noise_scheduler = DDIMScheduler(**OmegaConf.to_container(noise_scheduler_kwargs))
 
     vae          = AutoencoderKL.from_pretrained(pretrained_model_path, subfolder="vae")
-    tokenizer    = CLIPTokenizer.from_pretrained(pretrained_model_path, subfolder="tokenizer")
-    text_encoder = CLIPTextModel.from_pretrained(pretrained_model_path, subfolder="text_encoder")
-    if not image_finetune:
-        unet = UNet3DConditionModel.from_pretrained_2d(
-            pretrained_model_path, subfolder="unet", 
-            unet_additional_kwargs=OmegaConf.to_container(unet_additional_kwargs)
-        )
-    else:
-        unet = UNet2DConditionModel.from_pretrained(pretrained_model_path, subfolder="unet")
-        
+    reference_unet = UNet2DConditionModel.from_pretrained(pretrained_reference_model_path, subfolder="unet")
+    # CLIP: https://huggingface.co/openai/clip-vit-large-patch14, https://huggingface.co/docs/transformers/model_doc/clip
+    # https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPModel.get_image_features
+    # https://huggingface.co/sentence-transformers/clip-ViT-L-14
+    clip = SentenceTransformer('clip-ViT-L-14')
+    pose_guider = PoseGuider3D()
+
+    # VAE + CLIP + Reference_net + Pose_Guider + Unet    
+    animate_anyone_model = AnimateAnyoneModel(VAE = vae, CLIP = clip, ReferenceNet = reference_unet, Pose_Guider3D = pose_guider, Unet_3D = unet)
+    animate_anyone_model.to(local_rank)
+
     # Load pretrained unet weights
     if unet_checkpoint_path != "":
         zero_rank_print(f"from checkpoint: {unet_checkpoint_path}")
@@ -186,11 +192,7 @@ def main(
         m, u = unet.load_state_dict(state_dict, strict=False)
         zero_rank_print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
         assert len(u) == 0
-        
-    # Freeze vae and text_encoder
-    vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
-    
+            
     # Set unet trainable parameters
     unet.requires_grad_(False)
     for name, param in unet.named_parameters():
@@ -228,7 +230,7 @@ def main(
     text_encoder.to(local_rank)
 
     # Get the training dataset
-    train_dataset = WebVid10M(**train_data, is_image=image_finetune)
+    train_dataset = VideoDataset(train_data_folder_list)
     distributed_sampler = DistributedSampler(
         train_dataset,
         num_replicas=num_processes,
@@ -240,6 +242,7 @@ def main(
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
+        collate_fn=collate_fn,
         batch_size=train_batch_size,
         shuffle=False,
         sampler=distributed_sampler,
@@ -378,6 +381,16 @@ def main(
             # Predict the noise residual and compute loss
             # Mixed-precision training
             with torch.cuda.amp.autocast(enabled=mixed_precision_training):
+                # batch["reference_image"] [B, C, H, W] scale (-1, 1)
+                # batch["pose_sequence"] [B, T, C, H, W] (-1, 1)
+                # batch["pixel_values"] [B, T, C, H, W] (-1, 1)
+                # batch["pose_sequence"] = rearrange(batch["pose_sequence"], "b f c h w -> b c f h w")
+
+                """
+                model_pred = 
+                """
+                # encoder_hidden_states [1,77,768]
+                # noisy_latents [B, C = 4, T, H // 8, W // 8]
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
