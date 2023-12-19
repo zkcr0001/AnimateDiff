@@ -117,7 +117,7 @@ class AnimateAnyoneModel(nn.Module):
         # pose_sequence # [B, F, C, H, W]
         reference_latents = self.VAE.encode(reference_image_torch).latent_dist.sample() # [B, 4, H // 8, W // 8]
         reference_prompt = self.CLIP.encode(reference_image_pil) # numpy (768,)
-        reference_prompt = torch.from_numpy(reference_prompt).repeat(1, 77, 1).cuda() # torch.size([1, 77, 768])
+        reference_prompt = torch.from_numpy(reference_prompt).repeat(1, 77, 1).cuda(2) # torch.size([1, 77, 768])
         # TODO: should we pad zero, should we add classifier free guidance
         reference_net_results_list = self.get_reference_results(reference_latents, timesteps, reference_prompt)
         for test_tensor in reference_net_results_list:
@@ -160,12 +160,12 @@ class AnimateAnyoneModel(nn.Module):
                     encoder_hidden_states=reference_prompt,
                     attention_mask=attention_mask,
                 )
+
             else:
                 noise_sequence, res_samples = downsample_block(hidden_states=noise_sequence, temb=emb)
-            reference_block_id_count += 1
-
+            reference_block_id_count += 1            
             down_block_res_samples += res_samples
-            print("noise sequence shape:", noise_sequence.shape)
+            print("noise sequence after down shape:", noise_sequence.shape)
 
         # 4. mid
         noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
@@ -173,7 +173,7 @@ class AnimateAnyoneModel(nn.Module):
         noise_sequence = self.Unet_3D.mid_block(
             noise_sequence, emb, encoder_hidden_states=reference_prompt, attention_mask=attention_mask
         )
-        print("noise sequence shape:", noise_sequence.shape)
+        print("noise sequence after mid shape:", noise_sequence.shape)
 
         # 5. up
         for i, upsample_block in enumerate(self.Unet_3D.up_blocks):
@@ -189,6 +189,12 @@ class AnimateAnyoneModel(nn.Module):
 
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
                 noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
+                # change the last dimension by padding zero
+                list_from_tuple = list(res_samples)
+                zero_tensor = torch.zeros_like(list_from_tuple[-1])
+                list_from_tuple[-1] = torch.concat([list_from_tuple[-1], zero_tensor], dim = 4)
+                res_samples = tuple(list_from_tuple)
+                #
                 noise_sequence = upsample_block(
                     hidden_states=noise_sequence,
                     temb=emb,
@@ -202,7 +208,7 @@ class AnimateAnyoneModel(nn.Module):
                     hidden_states=noise_sequence, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
                 )
             reference_block_id_count += 1
-            print("noise sequence shape:", noise_sequence.shape)
+            print("noise sequence after up shape:", noise_sequence.shape)
         # 6. post-process
         noise_sequence = self.Unet_3D.conv_norm_out(noise_sequence)
         print("noise sequence shape:", noise_sequence.shape)
@@ -224,20 +230,20 @@ unet = UNet3DConditionModel.from_pretrained_2d(
 )
 pretrained_reference_model_path = 'models/StableDiffusion/stable-diffusion-v1-5'
 reference_unet = UNet2DConditionModel.from_pretrained(pretrained_reference_model_path, subfolder="unet")
-clip = SentenceTransformer('clip-ViT-L-14').cuda()
+clip = SentenceTransformer('clip-ViT-L-14').cuda(2)
 pose_guider = PoseGuider3D()
 
 animate_anyone_model = AnimateAnyoneModel(VAE = vae, CLIP = clip, ReferenceNet = reference_unet, Pose_Guider3D = pose_guider, Unet_3D = unet)
-animate_anyone_model.cuda()
-reference_image = torch.randn(1, 3, 256, 256).cuda()
+animate_anyone_model.cuda(2)
+reference_image = torch.randn(1, 3, 256, 256).cuda(2)
 
 url = "http://images.cocodataset.org/val2017/000000039769.jpg"
 image = Image.open(requests.get(url, stream=True).raw).resize((256, 256))
 
-pose_sequence = torch.randn(1, 16, 3, 256 ,256).cuda()
+pose_sequence = torch.randn(1, 16, 3, 256 ,256).cuda(2)
 
 # noise_sequence = torch.randn(B, 4, F, H // 8, W // 8).cuda()
-noise_sequence = torch.randn(1, 4, 16, 256 // 8, 256 // 8).cuda()
-timesteps = torch.tensor(42).cuda()
+noise_sequence = torch.randn(1, 4, 16, 256 // 8, 256 // 8).cuda(2)
+timesteps = torch.tensor(42).cuda(2)
 
 output = animate_anyone_model(noise_sequence, reference_image, image, pose_sequence, timesteps)
