@@ -276,22 +276,14 @@ class UNetMidBlock3DCrossAttn(nn.Module):
         self.motion_modules = nn.ModuleList(motion_modules)
 
     def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, reference_result=None, concat_fn=None,):
-        print("    UNetMidBlock3DCrossAttn hidden_states in", hidden_states.shape)
-        print("    UNetMidBlock3DCrossAttn temb in", temb.shape if temb is not None else None)
-        print("    UNetMidBlock3DCrossAttn encoder_hidden_states in", encoder_hidden_states.shape if encoder_hidden_states is not None else None)
         output_states = ()
         hidden_states = self.resnets[0](hidden_states, temb)
-        print("    UNetMidBlock3DCrossAttn hidden_states after resnet", hidden_states.shape)
         for attn, resnet, motion_module in zip(self.attentions, self.resnets[1:], self.motion_modules):
-            print("    UNetMidBlock3DCrossAttn hidden_states in for loop in", hidden_states.shape)
             hidden_states = concat_fn(reference_result[0], hidden_states) if concat_fn is not None else hidden_states
             reference_result = reference_result[1:]
             hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
-            print("    UNetMidBlock3DCrossAttn hidden_states in for loop after attn", hidden_states.shape)
             hidden_states = motion_module(hidden_states, temb, encoder_hidden_states=encoder_hidden_states) if motion_module is not None else hidden_states
-            print("    UNetMidBlock3DCrossAttn hidden_states in for loop after motion module", hidden_states.shape)
             hidden_states = resnet(hidden_states, temb)
-            print("    UNetMidBlock3DCrossAttn hidden_states in for loop out", hidden_states.shape)
             output_states += (hidden_states,)
 
         return hidden_states, output_states
@@ -420,10 +412,6 @@ class CrossAttnDownBlock3D(nn.Module):
 
     def forward(self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, reference_result=None, concat_fn=None):
         output_states = ()
-        print("    CrossAttnDownBlock3D hidden_states in", hidden_states.shape)
-        print("    CrossAttnDownBlock3D temb in", temb.shape if temb is not None else None)
-        print("    CrossAttnDownBlock3D encoder_hidden_states in", encoder_hidden_states.shape if encoder_hidden_states is not None else None)
-        print("    len(attn)", len(self.attentions))
         for idx, (resnet, attn, motion_module) in enumerate(zip(self.resnets, self.attentions, self.motion_modules)):
             if self.training and self.gradient_checkpointing:
 
@@ -436,45 +424,35 @@ class CrossAttnDownBlock3D(nn.Module):
 
                     return custom_forward
 
-                print("    CrossAttnDownBlock3D hidden_states in for loop in", hidden_states.shape)
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
                 hidden_states = concat_fn(reference_result[0], hidden_states) if concat_fn is not None else hidden_states
                 reference_result = reference_result[1:]
-                print("    CrossAttnDownBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(attn, return_dict=False),
                     hidden_states,
                     encoder_hidden_states,
                 )[0]
-                print("    CrossAttnDownBlock3D hidden_states in for loop after attention", hidden_states.shape)
                 if motion_module is not None:
                     hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(motion_module), hidden_states.requires_grad_(), temb, encoder_hidden_states)
-                    print("    CrossAttnDownBlock3D hidden_states in for loop after motion_module", hidden_states.shape)
                 
             else:
-                print("    CrossAttnDownBlock3D hidden_states in for loop in", hidden_states.shape)
                 hidden_states = resnet(hidden_states, temb)
-                print("    CrossAttnDownBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 hidden_states = concat_fn(reference_result[0], hidden_states) if concat_fn is not None else hidden_states
                 reference_result = reference_result[1:]
                 hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
-                print("    CrossAttnDownBlock3D hidden_states in for loop after attention", hidden_states.shape)
                 
                 # add motion module
                 hidden_states = motion_module(hidden_states, temb, encoder_hidden_states=encoder_hidden_states) if motion_module is not None else hidden_states
-                print("    CrossAttnDownBlock3D hidden_states in for loop after motion module", hidden_states.shape)
 
             output_states += (hidden_states,)
 
         if self.downsamplers is not None:
             for downsampler in self.downsamplers:
                 hidden_states = downsampler(hidden_states)
-                print("    CrossAttnDownBlock3D hidden_states after downsampler", hidden_states.shape)
 
             output_states += (hidden_states,)
 
         reference_result = reference_result[1:]
-        print("    CrossAttnDownBlock3D hidden_states out", hidden_states.shape)
 
         return hidden_states, output_states
 
@@ -550,9 +528,6 @@ class DownBlock3D(nn.Module):
 
     def forward(self, hidden_states, temb=None, encoder_hidden_states=None):
         output_states = ()
-        print("    DownBlock3D hidden_states in", hidden_states.shape)
-        print("    DownBlock3D temb in", temb.shape if temb is not None else None)
-        print("    DownBlock3D encoder_hidden_states in", encoder_hidden_states.shape if encoder_hidden_states is not None else None)
         for resnet, motion_module in zip(self.resnets, self.motion_modules):
             
             if self.training and self.gradient_checkpointing:
@@ -561,30 +536,22 @@ class DownBlock3D(nn.Module):
                         return module(*inputs)
 
                     return custom_forward
-                print("    DownBlock3D hidden_states in for loop in", hidden_states.shape)
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
-                print("    DownBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 if motion_module is not None:
                     hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(motion_module), hidden_states.requires_grad_(), temb, encoder_hidden_states)
-                    print("    DownBlock3D hidden_states in for loop after motion_module", hidden_states.shape)
             else:
-                print("    DownBlock3D hidden_states in for loop in", hidden_states.shape)
                 hidden_states = resnet(hidden_states, temb)
-                print("    DownBlock3D hidden_states in for loop after resnet", hidden_states.shape)
 
                 # add motion module
                 hidden_states = motion_module(hidden_states, temb, encoder_hidden_states=encoder_hidden_states) if motion_module is not None else hidden_states
-                print("    DownBlock3D hidden_states in for loop after motion module", hidden_states.shape)
 
             output_states += (hidden_states,)
 
         if self.downsamplers is not None:
             for downsampler in self.downsamplers:
                 hidden_states = downsampler(hidden_states)
-                print("    DownBlock3D hidden_states after downsampler", hidden_states.shape)
 
             output_states += (hidden_states,)
-        print("    DownBlock3D hidden_states out", hidden_states.shape)
         return hidden_states, output_states
 
 
@@ -721,15 +688,9 @@ class CrossAttnUpBlock3D(nn.Module):
         concat_fn=None,
     ):
         output_states = ()
-        print("    CrossAttnUpBlock3D hidden_states in", hidden_states.shape)
-        for i, f in enumerate(res_hidden_states_tuple):
-            print("CrossAttnUpBlock3D res_hidden_states_tuples in", i, f.shape)
-        print("    CrossAttnUpBlock3D temb in", temb.shape if temb is not None else None)
-        print("    len(attn)", len(self.attentions))
         for idx, (resnet, attn, motion_module) in enumerate(zip(self.resnets, self.attentions, self.motion_modules)):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
-            print("CrossAttnUpBlock3D res_hidden_states in for loop in", res_hidden_states.shape)
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
@@ -744,32 +705,24 @@ class CrossAttnUpBlock3D(nn.Module):
 
                     return custom_forward
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
-                print("    CrossAttnUpBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 hidden_states = concat_fn(reference_result[0], hidden_states) if concat_fn is not None else hidden_states
                 reference_result = reference_result[1:]
-                print("    CrossAttnUpBlock3D hidden_states in for loop in", hidden_states.shape)
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(attn, return_dict=False),
                     hidden_states,
                     encoder_hidden_states,
                 )[0]
-                print("    CrossAttnUpBlock3D hidden_states in for loop after attention", hidden_states.shape)
                 if motion_module is not None:
                     hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(motion_module), hidden_states.requires_grad_(), temb, encoder_hidden_states)
-                    print("    CrossAttnUpBlock3D hidden_states in for loop after motion_module", hidden_states.shape)
 
             else:
                 hidden_states = resnet(hidden_states, temb)
-                print("    CrossAttnUpBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 hidden_states = concat_fn(reference_result[0], hidden_states) if concat_fn is not None else hidden_states
                 reference_result = reference_result[1:]
-                print("    CrossAttnUpBlock3D hidden_states in for loop in", hidden_states.shape)
                 hidden_states = attn(hidden_states, encoder_hidden_states=encoder_hidden_states).sample
-                print("    CrossAttnUpBlock3D hidden_states in for loop after attention", hidden_states.shape)
                 
                 # add motion module
                 hidden_states = motion_module(hidden_states, temb, encoder_hidden_states=encoder_hidden_states) if motion_module is not None else hidden_states
-                print("    CrossAttnUpBlock3D hidden_states in for loop after motion module", hidden_states.shape)
             
             output_states += (hidden_states,)
 
@@ -777,10 +730,8 @@ class CrossAttnUpBlock3D(nn.Module):
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size)
-                print("    CrossAttnUpBlock3D hidden_states after upsampler", hidden_states.shape)
                 output_states += (hidden_states,)
 
-        print("    CrossAttnUpBlock3D hidden_states out", hidden_states.shape)
 
         return hidden_states, output_states
 
@@ -854,9 +805,7 @@ class UpBlock3D(nn.Module):
         output_states = ()
         for resnet, motion_module in zip(self.resnets, self.motion_modules):
             # pop res hidden states
-            print("    UpBlock3D hidden_states in for loop in", hidden_states.shape)
             res_hidden_states = res_hidden_states_tuple[-1]
-            print("    UpBlock3D res_hidden_states in for loop in", res_hidden_states.shape)
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
             hidden_states = torch.cat([hidden_states, res_hidden_states], dim=1)
 
@@ -868,15 +817,11 @@ class UpBlock3D(nn.Module):
                     return custom_forward
 
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
-                print("    UpBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 if motion_module is not None:
                     hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(motion_module), hidden_states.requires_grad_(), temb, encoder_hidden_states)
-                    print("    UpBlock3D hidden_states in for loop after motion_module", hidden_states.shape)
             else:
                 hidden_states = resnet(hidden_states, temb)
-                print("    UpBlock3D hidden_states in for loop after resnet", hidden_states.shape)
                 hidden_states = motion_module(hidden_states, temb, encoder_hidden_states=encoder_hidden_states) if motion_module is not None else hidden_states
-                print("    UpBlock3D hidden_states in for loop after motion module", hidden_states.shape)
 
             output_states += (hidden_states,)
 
@@ -884,7 +829,5 @@ class UpBlock3D(nn.Module):
             for upsampler in self.upsamplers:
                 hidden_states = upsampler(hidden_states, upsample_size)
                 output_states += (hidden_states,)
-                print("    UpBlock3D hidden_states after upsampler", hidden_states.shape)
-        print("    UpBlock3D hidden_states out", hidden_states.shape)
-
+                
         return hidden_states, output_states

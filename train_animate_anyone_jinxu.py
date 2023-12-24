@@ -14,6 +14,8 @@ from einops import rearrange
 from omegaconf import OmegaConf
 from safetensors import safe_open
 from typing import Dict, Optional, Tuple
+from PIL import Image
+import numpy as np
 
 import torch
 import torchvision
@@ -25,8 +27,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 import diffusers
 from diffusers import AutoencoderKL, DDIMScheduler
-from diffusers.models import UNet2DConditionModel
-from diffusers.pipelines import StableDiffusionPipeline
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
@@ -37,9 +37,10 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from animatediff.data.video_dataset import VideoDataset, collate_fn
 # from animatediff.models.unet import UNet3DConditionModel
 from animatediff.models.animate_any_model_jinxu import AnimateAnyoneModel
-from animatediff.models.animate_anyone_network import UNet3DConditionModel
+from animatediff.models.animate_anyone_network_jinxu import UNet3DConditionModel
+from animatediff.models.unet_2d_condition import UNet2DConditionModel
 from animatediff.models.animate_anyone_network import PoseGuider3D
-from animatediff.pipelines.pipeline_animation import AnimationPipeline
+from animatediff.pipelines.pipeline_animation_anyone import AnimationAnyonePipeline
 from animatediff.utils.util import save_videos_grid, zero_rank_print
 from sentence_transformers import SentenceTransformer
 from einops import rearrange
@@ -49,7 +50,7 @@ def init_dist(launcher="slurm", backend='nccl', port=29500, **kwargs):
     if launcher == 'pytorch':
         rank = int(os.environ['RANK'])
         num_gpus = torch.cuda.device_count()
-        local_rank = rank % num_gpus
+        local_rank = rank % num_gpus + 1
         print("111", rank, local_rank, num_gpus)
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend=backend, **kwargs)
@@ -89,8 +90,8 @@ def main(
     pretrained_model_path: str,
     pretrained_reference_model_path: str,
 
-    train_data_folder_list: list = [Path("/home/ubuntu/Pose_dataset/Processed_video/Fashion_train"), Path("/home/ubuntu/Pose_dataset/Processed_video/Tic-Tok_train")],
-    validation_data_folder_list: list = [Path("/home/ubuntu/Pose_dataset/Processed_video/Fashion_test"), Path("/home/ubuntu/Pose_dataset/Processed_video/Tic-Tok_test")],
+    train_data_folder_list: list = ["/home/ubuntu/Pose_dataset/Processed_video/Fashion_train", "/home/ubuntu/Pose_dataset/Processed_video/Tic-Tok_train"],
+    valid_data_folder_list: list = ["/home/ubuntu/Pose_dataset/Processed_video/Fashion_test", "/home/ubuntu/Pose_dataset/Processed_video/Tic-Tok_test"],
     cfg_random_null_text: bool = True,
     cfg_random_null_text_ratio: float = 0.1,
     
@@ -157,7 +158,7 @@ def main(
     )
 
     if is_main_process and (not is_debug) and use_wandb:
-        run = wandb.init(project="animatediff", name=folder_name, config=config)
+        run = wandb.init(project="animateanyone", name=folder_name, config=config)
 
     # Handle the output folder creation
     if is_main_process:
@@ -176,11 +177,43 @@ def main(
     # https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPModel.get_image_features
     # https://huggingface.co/sentence-transformers/clip-ViT-L-14
     clip = SentenceTransformer('clip-ViT-L-14')
+    unet = UNet3DConditionModel.from_pretrained_2d(pretrained_model_path, subfolder="unet", shrink_half=True, unet_additional_kwargs=OmegaConf.to_container(unet_additional_kwargs))
     pose_guider = PoseGuider3D()
 
-    # VAE + CLIP + Reference_net + Pose_Guider + Unet    
-    animate_anyone_model = AnimateAnyoneModel(VAE = vae, CLIP = clip, ReferenceNet = reference_unet, Pose_Guider3D = pose_guider, Unet_3D = unet)
-    animate_anyone_model.to(local_rank)
+    # Set trainable parameters
+    vae.requires_grad_(False)
+    clip.requires_grad_(False)
+    reference_unet.requires_grad_(False)
+    unet.requires_grad_(True)
+    pose_guider.requires_grad_(True)
+
+    # Enable xformers
+    if enable_xformers_memory_efficient_attention:
+        if is_xformers_available():
+            reference_unet.enable_xformers_memory_efficient_attention()
+            unet.enable_xformers_memory_efficient_attention()
+        else:
+            raise ValueError("xformers is not available. Make sure it is installed correctly")
+
+    # Enable gradient checkpointing
+    if gradient_checkpointing:
+        reference_unet.enable_gradient_checkpointing()
+        unet.enable_gradient_checkpointing()
+
+    # Move models to GPU
+    vae.to(local_rank)
+    clip.to(local_rank)
+    reference_unet.to(local_rank)
+    unet.to(local_rank)
+    pose_guider.to(local_rank)
+
+    # Validation pipeline
+    validation_pipeline = AnimationAnyonePipeline(
+        vae=vae, referencenet=reference_unet, poseguider3D=pose_guider, unet=unet, clip=clip, scheduler=noise_scheduler,
+    )
+
+    # Reference_net + Pose_Guider + Unet    
+    model = AnimateAnyoneModel(ReferenceNet = reference_unet, Pose_Guider3D = pose_guider, Unet_3D = unet)
 
     # Load pretrained unet weights
     if unet_checkpoint_path != "":
@@ -189,19 +222,13 @@ def main(
         if "global_step" in unet_checkpoint_path: zero_rank_print(f"global_step: {unet_checkpoint_path['global_step']}")
         state_dict = unet_checkpoint_path["state_dict"] if "state_dict" in unet_checkpoint_path else unet_checkpoint_path
 
-        m, u = unet.load_state_dict(state_dict, strict=False)
-        zero_rank_print(f"missing keys: {len(m)}, unexpected keys: {len(u)}")
-        assert len(u) == 0
+        m, u = model.load_state_dict(state_dict, strict=False)
+        print(f"Load missing keys: {len(m)}, unexpected keys: {len(u)}")
+
+    
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
             
-    # Set unet trainable parameters
-    unet.requires_grad_(False)
-    for name, param in unet.named_parameters():
-        for trainable_module_name in trainable_modules:
-            if trainable_module_name in name:
-                param.requires_grad = True
-                break
-            
-    trainable_params = list(filter(lambda p: p.requires_grad, unet.parameters()))
+    trainable_params = list(filter(lambda p: p.requires_grad, model.parameters()))
     optimizer = torch.optim.AdamW(
         trainable_params,
         lr=learning_rate,
@@ -214,23 +241,9 @@ def main(
         zero_rank_print(f"trainable params number: {len(trainable_params)}")
         zero_rank_print(f"trainable params scale: {sum(p.numel() for p in trainable_params) / 1e6:.3f} M")
 
-    # Enable xformers
-    if enable_xformers_memory_efficient_attention:
-        if is_xformers_available():
-            unet.enable_xformers_memory_efficient_attention()
-        else:
-            raise ValueError("xformers is not available. Make sure it is installed correctly")
-
-    # Enable gradient checkpointing
-    if gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
-
-    # Move models to GPU
-    vae.to(local_rank)
-    text_encoder.to(local_rank)
-
     # Get the training dataset
-    train_dataset = VideoDataset(train_data_folder_list)
+    train_dataset = VideoDataset(train_data_folder_list, sample_size=(192, 128))
+    valid_dataset = VideoDataset(valid_data_folder_list, sample_size=(192, 128))
     distributed_sampler = DistributedSampler(
         train_dataset,
         num_replicas=num_processes,
@@ -250,6 +263,16 @@ def main(
         pin_memory=True,
         drop_last=True,
     )
+    valid_dataloader = torch.utils.data.DataLoader(
+        valid_dataset,
+        collate_fn=collate_fn,
+        batch_size=1,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True,
+        drop_last=True,
+    )
+
 
     # Get the training iteration
     if max_train_steps == -1:
@@ -271,21 +294,7 @@ def main(
         num_training_steps=max_train_steps * gradient_accumulation_steps,
     )
 
-    # Validation pipeline
-    if not image_finetune:
-        validation_pipeline = AnimationPipeline(
-            unet=unet, vae=vae, tokenizer=tokenizer, text_encoder=text_encoder, scheduler=noise_scheduler,
-        ).to("cuda")
-    else:
-        validation_pipeline = StableDiffusionPipeline.from_pretrained(
-            pretrained_model_path,
-            unet=unet, vae=vae, tokenizer=tokenizer, text_encoder=text_encoder, scheduler=noise_scheduler, safety_checker=None,
-        )
-    validation_pipeline.enable_vae_slicing()
 
-    # DDP warpper
-    unet.to(local_rank)
-    unet = DDP(unet, device_ids=[local_rank], output_device=local_rank)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / gradient_accumulation_steps)
@@ -303,6 +312,7 @@ def main(
         logging.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
         logging.info(f"  Gradient Accumulation steps = {gradient_accumulation_steps}")
         logging.info(f"  Total optimization steps = {max_train_steps}")
+        logging.info(f"  Training data folder list = {train_data_folder_list}")
     global_step = 0
     first_epoch = 0
 
@@ -315,61 +325,43 @@ def main(
 
     for epoch in range(first_epoch, num_train_epochs):
         train_dataloader.sampler.set_epoch(epoch)
-        unet.train()
+        model.train()
         
         for step, batch in enumerate(train_dataloader):
-            if cfg_random_null_text:
-                batch['text'] = [name if random.random() > cfg_random_null_text_ratio else "" for name in batch['text']]
-                
-            # Data batch sanity check
-            if epoch == first_epoch and step == 0:
-                pixel_values, texts = batch['pixel_values'].cpu(), batch['text']
-                if not image_finetune:
-                    pixel_values = rearrange(pixel_values, "b f c h w -> b c f h w")
-                    for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
-                        pixel_value = pixel_value[None, ...]
-                        save_videos_grid(pixel_value, f"{output_dir}/sanity_check/{'-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_rank}-{idx}'}.gif", rescale=True)
-                else:
-                    for idx, (pixel_value, text) in enumerate(zip(pixel_values, texts)):
-                        pixel_value = pixel_value / 2. + 0.5
-                        torchvision.utils.save_image(pixel_value, f"{output_dir}/sanity_check/{'-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_rank}-{idx}'}.png")
-                    
+                                    
             ### >>>> Training >>>> ###
             
             # Convert videos to latent space            
             pixel_values = batch["pixel_values"].to(local_rank)
+            openpose_values = batch["openpose_values"].to(local_rank)
+            first_image = [batch["images"][b][0] for b in range(len(batch["images"]))]
             video_length = pixel_values.shape[1]
-            with torch.no_grad():
-                if not image_finetune:
-                    pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
-                    latents = vae.encode(pixel_values).latent_dist
-                    latents = latents.sample()
-                    latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
-                else:
-                    latents = vae.encode(pixel_values).latent_dist
-                    latents = latents.sample()
+            reference_prompt = clip.encode(first_image, show_progress_bar=False) # numpy (768,)
+            reference_embedding = torch.from_numpy(reference_prompt).unsqueeze(1).repeat(1, 77, 1).to(local_rank)
 
+            # prepare latents
+            with torch.no_grad():
+                pixel_values = rearrange(pixel_values, "b f c h w -> (b f) c h w")
+                latents = vae.encode(pixel_values).latent_dist
+                latents = latents.sample()
+                latents = rearrange(latents, "(b f) c h w -> b c f h w", f=video_length)
                 latents = latents * 0.18215
+                reference_latents = latents[:, :, 0]
 
             # Sample noise that we'll add to the latents
             noise = torch.randn_like(latents)
+            reference_noise = torch.randn_like(reference_latents)
             bsz = latents.shape[0]
             
             # Sample a random timestep for each video
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
             timesteps = timesteps.long()
-            
+
             # Add noise to the latents according to the noise magnitude at each timestep
             # (this is the forward diffusion process)
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-            
-            # Get the text embedding for conditioning
-            with torch.no_grad():
-                prompt_ids = tokenizer(
-                    batch['text'], max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-                ).input_ids.to(latents.device)
-                encoder_hidden_states = text_encoder(prompt_ids)[0]
-                
+            reference_noisy_latents = noise_scheduler.add_noise(reference_latents, reference_noise, timesteps)
+                            
             # Get the target for loss depending on the prediction type
             if noise_scheduler.config.prediction_type == "epsilon":
                 target = noise
@@ -384,14 +376,11 @@ def main(
                 # batch["reference_image"] [B, C, H, W] scale (-1, 1)
                 # batch["pose_sequence"] [B, T, C, H, W] (-1, 1)
                 # batch["pixel_values"] [B, T, C, H, W] (-1, 1)
-                # batch["pose_sequence"] = rearrange(batch["pose_sequence"], "b f c h w -> b c f h w")
+                # batch["pose_sequence"] [B, T, C, H, W] (-1, 1)
 
-                """
-                model_pred = 
-                """
-                # encoder_hidden_states [1,77,768]
                 # noisy_latents [B, C = 4, T, H // 8, W // 8]
-                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+
+                model_pred = model(noisy_latents, reference_noisy_latents, reference_embedding, openpose_values, timesteps).sample
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
             optimizer.zero_grad()
@@ -415,20 +404,19 @@ def main(
             lr_scheduler.step()
             progress_bar.update(1)
             global_step += 1
-            
+
             ### <<<< Training <<<< ###
             
             # Wandb logging
             if is_main_process and (not is_debug) and use_wandb:
                 wandb.log({"train_loss": loss.item()}, step=global_step)
-                
             # Save checkpoint
-            if is_main_process and (global_step % checkpointing_steps == 0 or step == len(train_dataloader) - 1):
+            if is_main_process and (global_step % checkpointing_steps == 0):
                 save_path = os.path.join(output_dir, f"checkpoints")
                 state_dict = {
                     "epoch": epoch,
                     "global_step": global_step,
-                    "state_dict": unet.state_dict(),
+                    "state_dict": model.state_dict(),
                 }
                 if step == len(train_dataloader) - 1:
                     torch.save(state_dict, os.path.join(save_path, f"checkpoint-epoch-{epoch+1}.ckpt"))
@@ -443,45 +431,28 @@ def main(
                 generator = torch.Generator(device=latents.device)
                 generator.manual_seed(global_seed)
                 
-                height = train_data.sample_size[0] if not isinstance(train_data.sample_size, int) else train_data.sample_size
-                width  = train_data.sample_size[1] if not isinstance(train_data.sample_size, int) else train_data.sample_size
+                height = valid_dataset.sample_size[0] if not isinstance(valid_dataset.sample_size, int) else valid_dataset.sample_size
+                width  = valid_dataset.sample_size[1] if not isinstance(valid_dataset.sample_size, int) else valid_dataset.sample_size
 
-                prompts = validation_data.prompts[:2] if global_step < 1000 and (not image_finetune) else validation_data.prompts
+                for idx, batch in enumerate(valid_dataloader):
 
-                for idx, prompt in enumerate(prompts):
-                    if not image_finetune:
-                        sample = validation_pipeline(
-                            prompt,
-                            generator    = generator,
-                            video_length = train_data.sample_n_frames,
-                            height       = height,
-                            width        = width,
-                            **validation_data,
-                        ).videos
-                        save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{idx}.gif")
-                        samples.append(sample)
-                        
-                    else:
-                        sample = validation_pipeline(
-                            prompt,
-                            generator           = generator,
-                            height              = height,
-                            width               = width,
-                            num_inference_steps = validation_data.get("num_inference_steps", 25),
-                            guidance_scale      = validation_data.get("guidance_scale", 8.),
-                        ).images[0]
-                        sample = torchvision.transforms.functional.to_tensor(sample)
-                        samples.append(sample)
-                
-                if not image_finetune:
-                    samples = torch.concat(samples)
-                    save_path = f"{output_dir}/samples/sample-{global_step}.gif"
-                    save_videos_grid(samples, save_path)
+                    sample = validation_pipeline(
+                        openpose_pil_list   = batch["openposes"][0],
+                        reference_image_pil = batch["images"][0][0],
+                        generator           = generator,
+                        height              = height,
+                        width               = width,
+                    ).videos
+                    save_videos_grid(sample, f"{output_dir}/samples/sample-{global_step}/{idx}.gif")
+                    samples.append(sample)
+
+                    if idx > 1:
+                        break
                     
-                else:
-                    samples = torch.stack(samples)
-                    save_path = f"{output_dir}/samples/sample-{global_step}.png"
-                    torchvision.utils.save_image(samples, save_path, nrow=4)
+                samples = torch.concat(samples)
+                save_path = f"{output_dir}/samples/sample-{global_step}.gif"
+                save_videos_grid(samples, save_path)
+
 
                 logging.info(f"Saved samples to {save_path}")
                 

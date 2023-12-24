@@ -15,7 +15,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.modeling_utils import ModelMixin
 from diffusers.utils import BaseOutput, logging
 from diffusers.models.embeddings import TimestepEmbedding, Timesteps
-from .unet_blocks import (
+from .unet_blocks_jinxu import (
     CrossAttnDownBlock3D,
     CrossAttnUpBlock3D,
     DownBlock3D,
@@ -428,7 +428,6 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         # up
         for i, upsample_block in enumerate(self.up_blocks):
             is_final_block = i == len(self.up_blocks) - 1
-
             res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
             down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
 
@@ -458,6 +457,7 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
 
         if not return_dict:
             return (sample,)
+    
 
         return UNet3DConditionOutput(sample=sample)
 
@@ -506,217 +506,30 @@ class UNet3DConditionModel(ModelMixin, ConfigMixin):
         return model
     
 
+
+"""
 class AnimateAnyoneModel(nn.Module):
-    def __init__(self, ReferenceNet, Pose_Guider3D, Unet_3D, verbose = False):
+    def __init__(self, VAE, CLIP, ReferenceNet, Pose_Guider3D, Unet_3D):
         super(AnimateAnyoneModel, self).__init__()
 
+        self.VAE = VAE
+        self.CLIP = CLIP
         self.ReferenceNet = ReferenceNet
         self.Pose_Guider3D = Pose_Guider3D
         self.Unet_3D = Unet_3D
-        self.verbose = verbose
 
-    def concat_3d_2d(self, tensor_2d, tensor_3d):
-        b, c, f, h, w = tensor_3d.shape
-        tensor_2d_reshape = tensor_2d.unsqueeze(2).repeat(1,1,f,1,1)
-        concat_tensor = torch.cat((tensor_3d, tensor_2d_reshape), dim=4)
-        return concat_tensor
-    
-    def get_reference_results(self, reference_latents, timesteps, reference_prompt):
-        # ======================
-        # reference network
-        # ======================
-        reference_results_list = []
+    def forward(self, noise_sequence, reference_image, reference_image_pil, pose_sequence, timesteps):
+        B, F, C, H, W = pose_sequence.shape
+        reference_latents = self.VAE.encode(reference_image).latent_dist.sample()
+        reference_clip = self.CLIP.encode(reference_image_pil)
+        # decompose to for loop
+        reference_outputs = self.ReferenceNet(reference_latents, timesteps, reference_clip)
+        pose_guidance_sequence = self.Pose_Guider3D(pose_sequence)
 
-        attention_mask = None
-        forward_upsample_size = False
-        upsample_size = None
-        # 1. time embedding
-        timesteps = timesteps.expand(reference_latents.shape[0])
-        t_emb = self.ReferenceNet.time_proj(timesteps)
-        t_emb = t_emb.to(self.ReferenceNet.dtype)
-        emb = self.ReferenceNet.time_embedding(t_emb)
-        # 2. preprocess
-        reference_latents = self.ReferenceNet.conv_in(reference_latents) # [B, 320, H // 8, W // 8])
-        reference_results_list.append(reference_latents)
-        # 3. down
-        reference_down_block_res_samples = (reference_latents,)
-        for downsample_block in self.ReferenceNet.down_blocks:
-            if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
-                reference_latents, res_samples = downsample_block(
-                    hidden_states=reference_latents,
-                    temb=emb,
-                    encoder_hidden_states=reference_prompt,
-                    attention_mask=attention_mask,
-                )
-            else:
-                reference_latents, res_samples = downsample_block(hidden_states=reference_latents, temb=emb)
+        noise_outputs= self.Unet_3D(noise_sequence, timesteps).sample
 
-            reference_down_block_res_samples += res_samples
-            reference_results_list.append(reference_latents)
-
-        # 4. mid
-        reference_latents = self.ReferenceNet.mid_block(
-            reference_latents, emb, encoder_hidden_states=reference_prompt, attention_mask=attention_mask
-        )
-        reference_results_list.append(reference_latents)
-
-        # 5. up
-        for i, upsample_block in enumerate(self.ReferenceNet.up_blocks):
-            is_final_block = i == len(self.ReferenceNet.up_blocks) - 1
-
-            res_samples = reference_down_block_res_samples[-len(upsample_block.resnets) :]
-            reference_down_block_res_samples = reference_down_block_res_samples[: -len(upsample_block.resnets)]
-
-            # if we have not reached the final block and need to forward the
-            # upsample size, we do it here
-            if not is_final_block and forward_upsample_size:
-                upsample_size = reference_down_block_res_samples[-1].shape[2:]
-
-            if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
-                reference_latents = upsample_block(
-                    hidden_states=reference_latents,
-                    temb=emb,
-                    res_hidden_states_tuple=res_samples,
-                    encoder_hidden_states=reference_prompt,
-                    upsample_size=upsample_size,
-                    attention_mask=attention_mask,
-                )
-            else:
-                reference_latents = upsample_block(
-                    hidden_states=reference_latents, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
-                )
-            reference_results_list.append(reference_latents)
-
-        # 6. post-process
-        '''
-        reference_latents = self.ReferenceNet.conv_norm_out(reference_latents)
-        print("reference shape:", reference_latents.shape)
-        reference_latents = self.ReferenceNet.conv_act(reference_latents)
-        print("reference shape:", reference_latents.shape)
-        reference_latents = self.ReferenceNet.conv_out(reference_latents)
-        print("reference shape:", reference_latents.shape)
-        '''
-
-        if self.verbose:
-            for reference_result in reference_results_list:
-                print(reference_result.shape)
-
-        return reference_results_list
-
-    def forward(self, noise_sequence, reference_latents, reference_prompt_encode, pose_sequence, timesteps):
-        # noise_sequence # [B, 4, F, H, W]
-        # reference_latents # [B, 4, H // 8, W // 8] 
-        # reference_prompt_encode # torch.size([1, 77, 768])
-        # pose_sequence # [B, F, C, H, W]
-        # TODO: should we pad zero, should we add classifier free guidance
-        reference_net_results_list = self.get_reference_results(reference_latents, timesteps, reference_prompt_encode)
-        for test_tensor in reference_net_results_list:
-            print(test_tensor.shape)
-        pose_sequence = rearrange(pose_sequence, "b f c h w -> b c f h w")
-        
-        # ======================
-        # 3D unet
-        # remember to add pose_guidance sequence
-        # ======================
-
-        pose_guidance_sequence = self.Pose_Guider3D(pose_sequence) # [B, 320, F, H // 8, W // 8]
-
-        attention_mask = None
-        forward_upsample_size = False
-        upsample_size = None    
-
-        # the network block id for concating features
-        reference_block_id_count = 0    
-
-        # 1. time embedding
-        timesteps = timesteps.expand(reference_latents.shape[0])
-        t_emb = self.ReferenceNet.time_proj(timesteps)
-        t_emb = t_emb.to(self.ReferenceNet.dtype)
-        emb = self.ReferenceNet.time_embedding(t_emb)
-        # 2. preprocess
-        noise_sequence = self.Unet_3D.conv_in(noise_sequence) # [B , 320, H // 8, W // 8])
-        if self.verbose:
-            print("noise sequence shape:", noise_sequence.shape)
-        # add reference latents and pose_guidance_sequence
-        noise_sequence += pose_guidance_sequence
-        # 3. down
-        down_block_res_samples = (noise_sequence,)
-        for downsample_block in self.Unet_3D.down_blocks:
-            if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
-                # if has cross attention, then it will have spatial attention, do feature concatentaion
-                noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
-                noise_sequence, res_samples = downsample_block(
-                    hidden_states=noise_sequence,
-                    temb=emb,
-                    encoder_hidden_states=reference_prompt_encode,
-                    attention_mask=attention_mask,
-                )
-
-            else:
-                noise_sequence, res_samples = downsample_block(hidden_states=noise_sequence, temb=emb)
-            reference_block_id_count += 1            
-            down_block_res_samples += res_samples
-            if self.verbose:
-                print("noise sequence after down shape:", noise_sequence.shape)
-
-        # 4. mid
-        noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
-        reference_block_id_count += 1
-        noise_sequence = self.Unet_3D.mid_block(
-            noise_sequence, emb, encoder_hidden_states=reference_prompt_encode, attention_mask=attention_mask
-        )
-        if self.verbose:
-            print("noise sequence after mid shape:", noise_sequence.shape)
-
-        # 5. up
-        for i, upsample_block in enumerate(self.Unet_3D.up_blocks):
-            is_final_block = i == len(self.Unet_3D.up_blocks) - 1
-
-            res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-            down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
-
-            # if we have not reached the final block and need to forward the
-            # upsample size, we do it here
-            if not is_final_block and forward_upsample_size:
-                upsample_size = down_block_res_samples[-1].shape[2:]
-
-            if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
-                noise_sequence = self.concat_3d_2d(reference_net_results_list[reference_block_id_count], noise_sequence)
-                # change the last dimension by padding zero
-                list_from_tuple = list(res_samples)
-                zero_tensor = torch.zeros_like(list_from_tuple[-1])
-                list_from_tuple[-1] = torch.concat([list_from_tuple[-1], zero_tensor], dim = 4)
-                res_samples = tuple(list_from_tuple)
-                #
-                noise_sequence = upsample_block(
-                    hidden_states=noise_sequence,
-                    temb=emb,
-                    res_hidden_states_tuple=res_samples,
-                    encoder_hidden_states=reference_prompt_encode,
-                    upsample_size=upsample_size,
-                    attention_mask=attention_mask,
-                )
-            else:
-                noise_sequence = upsample_block(
-                    hidden_states=noise_sequence, temb=emb, res_hidden_states_tuple=res_samples, upsample_size=upsample_size
-                )
-            reference_block_id_count += 1
-            if self.verbose:
-                print("noise sequence after up shape:", noise_sequence.shape)
-        # 6. post-process
-        noise_sequence = self.Unet_3D.conv_norm_out(noise_sequence)
-        if self.verbose:
-            print("noise sequence shape:", noise_sequence.shape)
-        noise_sequence = self.Unet_3D.conv_act(noise_sequence)
-        if self.verbose:
-            print("noise sequence shape:", noise_sequence.shape)
-        noise_sequence = self.Unet_3D.conv_out(noise_sequence)
-        if self.verbose:
-            print("noise sequence shape:", noise_sequence.shape)
-
-        # noise_outputs = self.Unet_3D(noise_sequence, timesteps, reference_prompt).sample # [B, 4 , F, H // 8, W // 8]
-        # print(noise_outputs.shape)
-        return noise_sequence
+        return 
+"""
         
 class InflatedConv3d(nn.Conv2d):
     def forward(self, x):
